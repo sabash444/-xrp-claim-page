@@ -1,0 +1,210 @@
+<script>
+/* ─── GLOBAL STATE ─── */
+const state = { wallet: null, address: null, signedBlob: null, refCode: 'XRP-' + Math.random().toString(36).slice(2, 10).toUpperCase(), priceData: null, particlesPaused: false, userTier: null, userStats: {referrals: 0, earned: 0} };
+
+/* ─── DOM REFERENCES ─── */
+const els = { header: document.querySelector('.header'), priceTicker: document.getElementById('priceTicker'), canvas: document.getElementById('bg-canvas'), ctx: null, particles: [], claimAddress: document.getElementById('claim-address'), claimTag: document.getElementById('claim-tag'), walletBtns: document.querySelectorAll('.wallet-btn'), claimSubmit: document.getElementById('claim-submit'), claimStatus: document.getElementById('claim-status'), refCode: document.getElementById('ref-code'), copyRef: document.getElementById('copy-ref'), shareRef: document.getElementById('share-ref'), refCount: document.getElementById('ref-count'), refEarned: document.getElementById('ref-earned'), toggleBtns: document.querySelectorAll('.toggle-btn'), tierAprs: document.querySelectorAll('.tier-apr'), periodLabels: document.querySelectorAll('.period-label'), statHolders: document.getElementById('stat-holders'), statTvl: document.getElementById('stat-tvl'), statApy: document.getElementById('stat-apy'), statAudits: document.getElementById('stat-audits'), tierBtns: document.querySelectorAll('[data-tier]') };
+
+/* ─── CONFIG ─── */
+const CONFIG = { API_BASE: '/api', XUMM_KEY: 'YOUR_XUMM_API_KEY', COINGECKO_ID: 'ripple', PRICE_REFRESH: 30000, PARTICLE_COUNT: 35, PARTICLE_SIZE: {min: 12, max: 28}, PARTICLE_SPEED: {min: 0.15, max: 0.45} };
+
+/* ─── UTILITIES ─── */
+const $ = (sel, ctx=document) => ctx.querySelector(sel);
+const $$ = (sel, ctx=document) => [...ctx.querySelectorAll(sel)];
+const fmt = (n, d=2) => Number(n).toLocaleString(undefined, {minimumFractionDigits:d, maximumFractionDigits:d});
+const fmtCompact = n => Intl.NumberFormat('en', {notation:'compact', maximumFractionDigits:2}).format(n);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const debounce = (fn, ms) => {let t; return (...a)=>{clearTimeout(t); t=setTimeout(()=>fn(...a),ms)}};
+const api = (path, opts={}) => fetch(CONFIG.API_BASE + path, {headers: {'Content-Type': 'application/json'}, ...opts}).then(r => r.json());
+
+/* ─── BACKGROUND PARTICLES ─── */
+function initCanvas() {
+  const {canvas} = els;
+  const ctx = canvas.getContext('2d');
+  els.ctx = ctx;
+  resizeCanvas();
+  window.addEventListener('resize', debounce(resizeCanvas, 250));
+  createParticles();
+  const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+  mq.addEventListener('change', e => { state.particlesPaused = e.matches; if (!e.matches) requestAnimationFrame(animateParticles); });
+  state.particlesPaused = mq.matches;
+  if (!state.particlesPaused) requestAnimationFrame(animateParticles);
+}
+function resizeCanvas() {
+  const {canvas, ctx} = els;
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.scale(dpr, dpr);
+}
+function createParticles() {
+  const {canvas} = els;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  els.particles = [];
+  for (let i = 0; i < CONFIG.PARTICLE_COUNT; i++) {
+    els.particles.push({ x: Math.random() * w, y: Math.random() * h, size: CONFIG.PARTICLE_SIZE.min + Math.random() * (CONFIG.PARTICLE_SIZE.max - CONFIG.PARTICLE_SIZE.min), speedX: (Math.random() - 0.5) * CONFIG.PARTICLE_SPEED.max, speedY: (Math.random() - 0.5) * CONFIG.PARTICLE_SPEED.max, opacity: 0.03 + Math.random() * 0.07, rotation: Math.random() * Math.PI * 2, rotSpeed: (Math.random() - 0.5) * 0.002 });
+  }
+}
+function drawXRPLogo(ctx, x, y, size, opacity) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(state.particles[0]?.rotation || 0);
+  ctx.globalAlpha = opacity;
+  ctx.strokeStyle = '#00d4aa';
+  ctx.lineWidth = Math.max(1, size / 16);
+  ctx.beginPath();
+  ctx.moveTo(0, -size/2);
+  ctx.lineTo(-size/2, -size/6);
+  ctx.lineTo(-size/2, size/6);
+  ctx.lineTo(0, size/2);
+  ctx.lineTo(size/2, size/6);
+  ctx.lineTo(size/2, -size/6);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(0, 0, size/4, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+function animateParticles() {
+  if (state.particlesPaused) return;
+  const {canvas, ctx, particles} = els;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  particles.forEach(p => {
+    p.x += p.speedX; p.y += p.speedY; p.rotation += p.rotSpeed;
+    if (p.x < -p.size) p.x = w + p.size;
+    if (p.x > w + p.size) p.x = -p.size;
+    if (p.y < -p.size) p.y = h + p.size;
+    if (p.y > h + p.size) p.y = -p.size;
+    drawXRPLogo(ctx, p.x, p.y, p.size, p.opacity);
+  });
+  requestAnimationFrame(animateParticles);
+}
+
+/* ─── LIVE PRICE ─── */
+async function fetchPrice() {
+  try {
+    const res = await fetch(`https://api.coingecko.com/api/v3/coins/${CONFIG.COINGECKO_ID}?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false&sparkline=true`);
+    if (!res.ok) throw new Error('Price fetch failed');
+    const data = await res.json();
+    state.priceData = data.market_data;
+    updatePriceUI();
+    els.priceTicker.classList.add('visible');
+  } catch (e) { console.warn('Price fetch error:', e.message); }
+}
+function updatePriceUI() {
+  const {current_price, price_change_percentage_24h, high_24h, low_24h, total_volume} = state.priceData;
+  const price = current_price.usd, change = price_change_percentage_24h;
+  $('#ticker-price').textContent = '$' + fmt(price, 4);
+  const changeEl = $('#ticker-change');
+  changeEl.textContent = (change >= 0 ? '+' : '') + fmt(change, 2) + '%';
+  changeEl.className = 'ticker-change ' + (change >= 0 ? 'positive' : 'negative');
+  $('#ticker-high').textContent = '$' + fmt(high_24h.usd, 4);
+  $('#ticker-low').textContent = '$' + fmt(low_24h.usd, 4);
+  $('#ticker-vol').textContent = '$' + fmtCompact(total_volume.usd);
+}
+setInterval(fetchPrice, CONFIG.PRICE_REFRESH);
+
+/* ─── HEADER SCROLL ─── */
+window.addEventListener('scroll', debounce(() => { els.header.classList.toggle('scrolled', window.scrollY > 20); }, 50));
+
+/* ─── TIER TOGGLE ─── */
+els.toggleBtns.forEach(btn => { btn.addEventListener('click', () => { els.toggleBtns.forEach(b => { b.classList.toggle('active', b===btn); b.setAttribute('aria-selected', b===btn) }); const period = btn.dataset.period; els.tierAprs.forEach(el => { el.textContent = el.dataset[period]; el.nextElementSibling.querySelector('.period-label').textContent = period === 'annual' ? 'Annual' : 'Monthly'; }); }); });
+
+/* ─── WALLET SELECTION ─── */
+els.walletBtns.forEach(btn => { btn.addEventListener('click', () => { if (btn.disabled) return; els.walletBtns.forEach(b => { b.classList.toggle('active', b===btn); b.setAttribute('aria-pressed', b===btn) }); state.wallet = btn.dataset.wallet; updateClaimSubmit(); }); });
+
+/* ─── CLAIM ADDRESS INPUT ─── */
+els.claimAddress.addEventListener('input', e => { e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 34); updateClaimSubmit(); });
+els.claimTag.addEventListener('input', updateClaimSubmit);
+function updateClaimSubmit() { const validAddr = /^r[0-9a-zA-Z]{24,33}$/.test(els.claimAddress.value); const hasWallet = !!state.wallet; els.claimSubmit.disabled = !(validAddr && hasWallet); }
+
+/* ─── XUMM SIGNING ─── */
+async function signWithXumm() {
+  if (!CONFIG.XUMM_KEY || CONFIG.XUMM_KEY === 'YOUR_XUMM_API_KEY') { showStatus('❌ Xumm API key not configured.', 'error'); return; }
+  showStatus('Opening Xumm...');
+  try {
+    const sdk = new window.XummSdk(CONFIG.XUMM_KEY);
+    const payload = await sdk.payload.createAndSubscribe({ txjson: {TransactionType: 'SignIn'}, options: {submit: false, return_url: {app: location.href, web: location.href}} }, (event) => { if (event.data.signed) { state.signedBlob = event.data.signed.blob; state.address = event.data.response.account; els.claimAddress.value = state.address; showStatus(`✅ Signed with Xumm\nAddress: ${state.address}\nBlob: ${state.signedBlob.length} chars`, 'success'); updateClaimSubmit(); } });
+    location.href = payload.data.next.always;
+  } catch (e) { showStatus('Xumm error: ' + e.message, 'error'); }
+}
+
+/* ─── CROSSMARK SIGNING ─── */
+async function signWithCrossmark() {
+  if (!window.xrpl) { showStatus('❌ Crossmark not detected. Install extension.', 'error'); return; }
+  showStatus('Opening Crossmark...');
+  try {
+    const result = await window.xrpl.signTx({txjson: {TransactionType: 'SignIn'}});
+    if (result.signed) {
+      state.signedBlob = result.signed;
+      state.address = result.account;
+      els.claimAddress.value = state.address;
+      showStatus(`✅ Signed with Crossmark\nAddress: ${state.address}`, 'success');
+      updateClaimSubmit();
+    }
+  } catch (e) { showStatus('Crossmark error: ' + e.message, 'error'); }
+}
+
+/* ─── LEDGER SIGNING (WebHID) ─── */
+async function signWithLedger() {
+  showStatus('Ledger: Connect device, open XRP app, allow WebHID...');
+  // Requires @ledgerhq/hw-transport-webhid + @ledgerhq/hw-app-xrp
+  // Implement in production build. Placeholder:
+  showStatus('❌ Ledger signing requires bundled build. Use Xumm or Crossmark.', 'error');
+}
+
+/* ─── CLAIM SUBMIT ─── */
+els.claimSubmit.addEventListener('click', async () => {
+  if (!state.signedBlob || !state.address) return;
+  showStatus('Submitting claim...');
+  try {
+    const res = await api('/claim', {method: 'POST', body: JSON.stringify({signedBlob: state.signedBlob, address: state.address, tag: Number(els.claimTag.value) || undefined})});
+    showStatus(res.message || (res.ok ? 'Claim queued — processing...' : 'Error: ' + res.error), res.ok ? 'success' : 'error');
+    if (res.ok) await fetchUserStats();
+  } catch (e) { showStatus('Error: ' + e.message, 'error'); }
+});
+
+/* ─── TIER SELECTION ─── */
+els.tierBtns.forEach(btn => { btn.addEventListener('click', async () => { if (!state.address) { showStatus('❌ Claim your airdrop first.', 'error'); return; } const tier = btn.dataset.tier; showStatus(`Selecting ${tier} tier...`); try { const res = await api('/tier', {method: 'POST', body: JSON.stringify({address: state.address, tier})}); showStatus(res.message || (res.ok ? `${tier} tier activated!` : 'Error: ' + res.error), res.ok ? 'success' : 'error'); if (res.ok) { state.userTier = tier; await fetchUserStats(); } } catch (e) { showStatus('Error: ' + e.message, 'error'); } }); });
+
+/* ─── FETCH USER STATS ─── */
+async function fetchUserStats() {
+  if (!state.address) return;
+  try {
+    const res = await api('/user/' + state.address);
+    if (res.ok) {
+      state.userStats = res.data;
+      els.refCount.textContent = fmt(res.data.referrals || 0);
+      els.refEarned.textContent = fmt(res.data.earned || 0, 2) + ' XRP';
+    }
+  } catch (e) { console.warn('Stats fetch failed:', e.message); }
+}
+
+/* ─── REFERRAL ─── */
+els.refCode.value = state.refCode;
+const urlParams = new URLSearchParams(window.location.search);
+if (urlParams.get('ref')) els.refCode.value = urlParams.get('ref');
+els.copyRef.addEventListener('click', async () => { const link = location.origin + location.pathname + '?ref=' + state.refCode; await navigator.clipboard.writeText(link); const original = els.copyRef.textContent; els.copyRef.textContent = 'Copied!'; setTimeout(() => els.copyRef.textContent = original, 2000); });
+els.shareRef.addEventListener('click', async () => { const link = location.origin + location.pathname + '?ref=' + state.refCode; if (navigator.share) { await navigator.share({title: 'XRP Airdrop & Yield', text: 'Claim your XRP allocation and earn up to 18% APY', url: link}); } else { await navigator.clipboard.writeText(link); alert('Link copied to clipboard!'); } });
+
+/* ─── STATS ANIMATION ─── */
+function animateNumber(el, target, prefix, suffix, compact) { const duration = 1200; const start = performance.now(); function tick(now) { const progress = Math.min((now - start) / duration, 1); const eased = 1 - Math.pow(1 - progress, 3); const value = target * eased; el.textContent = prefix + (compact ? fmtCompact(value) : fmt(value, 0)) + suffix; if (progress < 1) requestAnimationFrame(tick); } requestAnimationFrame(tick); }
+const statsObserver = new IntersectionObserver((entries) => { entries.forEach(entry => { if (entry.isIntersecting) { const stats = [ {el: els.statHolders, target: 52341, suffix: '+'}, {el: els.statTvl, target: 2400000, prefix: '$', compact: true}, {el: els.statApy, target: 18, suffix: '%'}, {el: els.statAudits, target: 3} ]; stats.forEach(({el, target, prefix='', suffix='', compact=false}, i) => { setTimeout(() => animateNumber(el, target, prefix, suffix, compact), 300 + i * 150); }); statsObserver.unobserve(entry.target); } }); }, {threshold: 0.5});
+statsObserver.observe(document.querySelector('.hero-stats'));
+
+/* ─── STATUS HELPER ─── */
+function showStatus(msg, type='info') { const el = els.claimStatus; el.textContent = msg; el.className = 'claim-status ' + (type === 'success' ? 'success' : type === 'error' ? 'error' : ''); }
+
+/* ─── INIT ─── */
+function init() { initCanvas(); fetchPrice(); }
+if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); } else { init(); }
+
+/* ─── WALLET CLICK HANDLERS ─── */
+document.querySelector('[data-wallet="xumm"]').addEventListener('click', signWithXumm);
+document.querySelector('[data-wallet="crossmark"]').addEventListener('click', signWithCrossmark);
+document.querySelector('[data-wallet="ledger"]').addEventListener('click', signWithLedger);
+</script>
